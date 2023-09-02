@@ -9,19 +9,22 @@ Install build dependencies to build external kernel modules. On Debian you
 can simply install in the linux headers and all necessary build dependencies
 such as the compiler used to build the running kernel will be pulled in,
 too:
-> sudo apt-get install linux-headers-`uname -r`
+```
+$ sudo apt-get install linux-headers-`uname -r`
+```
 
 In the firmata_mod directory do:
-
-> make
-> sudo make modules_install
-
+```
+$ make
+$ sudo make modules_install
+```
 You can ignore the warnings regarding BTF generation.
 
 Now you can load the firmata kernel module:
 
-> sudo modprobe firmata_mod [firmata_port=TTY_PORT] [baud_rate=N]
-
+```
+$ sudo modprobe firmata_mod [firmata_port=TTY_PORT] [baud_rate=N]
+```
 where TTY_PORT is your tty-port which connects to the Arduino. The default
 is "ttyUSB0". This must match the Port setting under Tools in the Arduino
 configuration menu, but without the "/dev/" part. The optional baud_rate
@@ -30,12 +33,13 @@ StandardFirmata, ConfigurableFirmata would use 115200.
 The modprobe command above may take several seconds to return, since the
 module verifies the Arduino with Firmata firmware is correctly configured.
 You can verify whether the drivers are loaded using lsmod:
-> lsmod | grep firmata
+```
+$ lsmod | grep firmata
 spi_firmata            16384  0
 i2c_firmata            16384  0
 gpio_firmata           16384  0
 firmata_mod            20480  3 spi_firmata,i2c_firmata,gpio_firmata
-
+```
 You can unload the driver again with:
 > sudo rmmod gpio_firmata spi_firmata i2c_firmata firmata_mod
 
