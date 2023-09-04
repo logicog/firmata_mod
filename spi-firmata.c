@@ -32,6 +32,12 @@
 
 struct spi_device *firmata_spi_device;
 
+/* Mapping of SPI channel to CS pin */
+u8 cs_channel_mapping[] = {
+	10,
+	9
+};
+
 struct firmata_spi {
 	struct platform_device *pdev;
 	struct spi_controller *controller;
@@ -44,14 +50,16 @@ struct firmata_spi {
 	unsigned int speed;
 };
 
+
+
 static int spi_reply_cb(struct platform_device *pdev, const u8 rxbuf[], int len)
 {
 	struct firmata_spi *spi = platform_get_drvdata(pdev);
 	uint8_t id, channel;
 	int i;
 
-	pr_info("spi_reply_cb: firmata_spi pointer %p, bytes %02x %02x %02x, len %d\n",
-		(void *) spi, rxbuf[0], rxbuf[1], rxbuf[2], len);
+	pr_info("spi_reply_cb: received %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x, len %d\n",
+		rxbuf[0], rxbuf[1], rxbuf[2], rxbuf[3], rxbuf[4], rxbuf[5], rxbuf[6], rxbuf[7], rxbuf[8], rxbuf[9], rxbuf[10], rxbuf[11], len);
 
 	// Discard any data sent outside an SPI transaction, e.g. spurious data on serial interface
 	if (!mutex_is_locked(&spi->lock)) {
@@ -96,8 +104,9 @@ static int spi_reply_cb(struct platform_device *pdev, const u8 rxbuf[], int len)
 	return len;
 }
 
-static void send_dev_config(struct firmata_spi *spi, struct spi_device *spi_dev, u8 channel)
+static void send_dev_config(struct firmata_spi *spi, struct spi_device *spi_dev)
 {
+	struct firmata_platform_data *pdata = dev_get_platdata(&spi->pdev->dev);
 	uint8_t buf[14];
 	int id = 0;
 	uint32_t speed = spi_dev->max_speed_hz; // TODO: use minimum of spi->speed and speed
@@ -105,7 +114,7 @@ static void send_dev_config(struct firmata_spi *spi, struct spi_device *spi_dev,
 	buf[0] = START_SYSEX;
 	buf[1] = SPI_DATA;
 	buf[2] = SPI_DEVICE_CONFIG;
-	buf[3] = channel | id << 3;
+	buf[3] = spi_dev->chip_select | id << 3;
 	buf[4] = ((spi_dev->mode & 0x3) << 1) | (spi_dev->mode & SPI_LSB_FIRST ? 0 : BIT(0));
 	buf[5] = speed & 0x7f;
 	buf[6] = (speed >> 7) & 0x7f;
@@ -114,9 +123,11 @@ static void send_dev_config(struct firmata_spi *spi, struct spi_device *spi_dev,
 	buf[9] = (speed >> 29) & 0x7f;
 	// Be compatible with implementations which only support the default (0 -> 8 bit)
 	buf[10] = spi_dev->bits_per_word != 8 ? spi_dev->bits_per_word : 0;
-	buf[11] = (spi_dev->mode & SPI_CS_HIGH ? BIT(1) : 0); // TODO: Enable automatic pin control | BIT(0);
-	pr_info("send_dev_config: chip_select %d\n", spi_dev->chip_select);
-	buf[12] = spi_dev->chip_select & 0x7f;
+	buf[11] = (spi_dev->mode & SPI_CS_HIGH ? BIT(1) : 0
+			| pdata->host_controls_cs ? 0 : BIT(0));
+	pr_info("send_dev_config: chip_select %d, pin %d\n",
+		spi_dev->chip_select, cs_channel_mapping[spi_dev->chip_select]);
+	buf[12] = cs_channel_mapping[spi_dev->chip_select] & 0x7f;
 	buf[13] = END_SYSEX;
 
 	firmata_serial_tx(spi->pdev, buf, 14);
@@ -149,14 +160,33 @@ static void send_spi_end(struct firmata_spi *spi, int channel)
 	firmata_serial_tx(spi->pdev, buf, 5);
 }
 
+static int firmata_setup(struct spi_device *spi_dev)
+{
+	struct spi_controller *ctrl = spi_dev->master;
+	struct firmata_spi *spi = spi_controller_get_devdata(ctrl);
+
+	pr_info("%s: firmata_setup called\n", __FILE__);
+	mutex_lock(&spi->lock);
+	if (!spi->spi_enabled)
+		send_spi_begin(spi, spi_dev->chip_select);
+	spi->spi_enabled = true;
+	send_dev_config(spi, spi_dev);
+	mutex_unlock(&spi->lock);
+	return 0;
+}
+
 static void firmata_set_cs(struct spi_device *spi_dev, bool active)
 {
 	struct firmata_spi *spi = spi_controller_get_devdata(spi_dev->controller);
 	struct firmata_platform_data *pdata = dev_get_platdata(&spi->pdev->dev);
 
 	pr_info("firmata: firmata_set_cs called, active: %d, cs: %d\n", active, spi_dev->chip_select);
-	if (pdata->host_controls_cs)
-		pr_info("Would set CS now\n");
+	if (!spi->spi_enabled)
+		firmata_setup(spi_dev);
+	if (pdata->host_controls_cs) {
+		pr_info("firmata_set_cs: Would set CS now\n");
+		// TODO: do this via gpiod_ calls
+	}
 }
 
 static int firmata_spi_tx(struct firmata_spi *spi, u8 deselect_cs, const u8 *data, u16 data_len)
@@ -199,11 +229,8 @@ static int firmata_transfer_one(struct spi_controller *ctrl, struct spi_device *
 	pr_info("%s: transfer_one called\n", __FILE__);
 
 	mutex_lock(&spi->lock);
-	/*
-	status = dln2_spi_transfer_setup(dln2, xfer->speed_hz,
-					 xfer->bits_per_word,
-					 spi->mode);
-	}*/
+	// TODO: Do we need to call transfer setup every time here to set
+	// e.g. per-device transfer speed?
 
 	if (!xfer->cs_change && !spi_transfer_is_last(ctrl, xfer))
 		deselect_cs = 0; // attr = SPI_ATTR_LEAVE_SS_LOW;
@@ -229,18 +256,14 @@ static int firmata_transfer_one(struct spi_controller *ctrl, struct spi_device *
 	return err;
 }
 
-static int firmata_setup(struct spi_device *spi_dev)
+static int spi_reset_cb(struct platform_device *pdev, const u8 rxbuf[], int len)
 {
-	struct spi_controller *master = spi_dev->master;
-	struct firmata_spi *spi = spi_controller_get_devdata(master);
+	struct firmata_spi *spi = platform_get_drvdata(pdev);
 
-	pr_info("%s: firmata_setup called\n", __FILE__);
-	mutex_lock(&spi->lock);
-	if (!spi->spi_enabled)
-		send_spi_begin(spi, 0); // FIXME: Channel 0
-	spi->spi_enabled = true;
-	send_dev_config(spi, spi_dev, 0); // FIXME: Channel 0
-	mutex_unlock(&spi->lock);
+	pr_info("spi_reset_cb: called\n");
+	// There was a reset on the device, and SPI is now disabled. We need to resend
+	// configuration data before the next transfer
+	spi->spi_enabled = false;
 	return 0;
 }
 
@@ -297,6 +320,7 @@ static int firmata_spi_probe(struct platform_device *pdev)
 		return err;
 	}
 
+	err = firmata_register_event_cb(pdev, RESET_CB, spi_reset_cb);
 	printk(KERN_INFO "Probing %s firmata_spi_probe 2\n", __FILE__);
 	err = devm_spi_register_controller(&pdev->dev, controller);
 	if (err) {
