@@ -6,7 +6,7 @@ connecting to the Arduino.
 
 # Installation
 Install build dependencies to build external kernel modules. On Debian you
-can simply install in the linux headers and all necessary build dependencies
+can simply install the linux headers and all necessary build dependencies
 such as the compiler used to build the running kernel will be pulled in,
 too:
 ```
@@ -47,7 +47,7 @@ $ sudo rmmod gpio_firmata spi_firmata i2c_firmata firmata_mod
 
 # GPIO-support
 In order to get more information about the now available GPIO lines, you can install
-the gpiod tools, alternatively, the information is also directly available
+the gpiod tools. Alternatively, the information is also directly available
 in the /sys file-system. In order to test gpio-access via python, the
 python3-libgpiod library is very convenient: 
 ```
