@@ -41,6 +41,7 @@
 #define I2C_REPLY		0x77
 #define REPORT_VERSION		0xf9
 #define SYSEX_ID		(START_SYSEX << 8)
+#define RESET_CB			0x00
 
 #define FIRMATA_SIZE_TXBUF 32
 #define FIRMATA_SIZE_RXBUF 1024

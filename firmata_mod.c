@@ -47,6 +47,11 @@ struct firmata_priv {
 	spinlock_t event_cb_lock;
 
 	struct completion firmware_initialized;
+	/* Some Arduino devices will reset the moment their USB<->UART
+	 * converter is initialized. We need to wait until this is done,
+	 * at which point these devices send a complete REPORT_FIRMWARE
+	 * message */
+	bool boot_completed;
 	int protocol_major;
 	int protocol_minor;
 	struct gpio_chip gpio;
@@ -165,7 +170,7 @@ static int firmata_ldisc_open(struct tty_struct *tty)
 	if (!tty->ops->write)
 		return -EOPNOTSUPP;
 
-	firmata = kmalloc(sizeof(*firmata), GFP_KERNEL);
+	firmata = kzalloc(sizeof(*firmata), GFP_KERNEL);
 	if (!firmata)
 		return -ENOMEM;
 
@@ -289,6 +294,12 @@ static void parse_sysex(struct firmata_priv *firmata, int len)
 	switch (sysex_code) {
 	case REPORT_FIRMWARE:
 		pr_info("Found REPORT_FIRMWARE, len %d\n", len);
+		// Is this a reset on the device?
+		if (firmata->boot_completed) {
+			pr_info("parse_sysex: Initial boot completed\n");
+			run_event_callbacks(firmata, RESET_CB, firmata->rxbuf + i, len);
+			break;
+		}
 		if (len >= 4) {
 			firmata->protocol_major = firmata->rxbuf[i + 1];
 			firmata->protocol_minor = firmata->rxbuf[i + 2];
@@ -305,6 +316,7 @@ static void parse_sysex(struct firmata_priv *firmata, int len)
 		buf[i / 2 - 2] = '\0';
 		pr_info("Protocol version %c.%c, version string %s\n", firmata->protocol_major + '0',
 						  firmata->protocol_minor + '0', buf);
+		firmata->boot_completed = true;
 		complete(&firmata->firmware_initialized);
 		break;
 	case STRING_MESSAGE:
@@ -541,7 +553,7 @@ enum {
 /* Only one SPI port supported */
 static struct firmata_platform_data firmata_pdata_spi = {
 	.port = 0,
-	.host_controls_cs = true,
+	.host_controls_cs = false,
 };
 
 static struct mfd_cell_acpi_match firmata_acpi_match_spi = {
