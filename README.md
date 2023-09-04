@@ -84,6 +84,10 @@ $ echo 1 > gpio677/value
 $ echo 0 > gpio677/value 
 ```
 
+Be aware that pin 13 (which is typically the on-board LED) may be assigned to SPI
+when running ConfigurableFirmata. That means that with the spi-firmata
+module loaded setting that pin via gpio will not work.
+
 # I2C-support
 If you want to work with I2C devices, you need to make sure i2c is
 accessible through userspace. Verify that the "i2c-tools" package is
@@ -199,3 +203,13 @@ static const struct spi_device_id spidev_spi_ids[] = {
 ```
 You can query the spi device using the spi-tools and python3-spidev
 packages.
+
+First, figure out which spi-device is being made available:
+```
+$ cd /sys/bus/spi/devices
+$ ls -l
+total 0
+lrwxrwxrwx 1 root root 0 Sep  3 16:07 spi1.0 -> ../../../devices/platform/firmata.0/firmata-spi.5.auto/spi_master/spi1/spi1.0
+```
+This means that firmata makes spi-device 0 on bus 1 available (device spi1.0)
+in userspace through the spidev module.
