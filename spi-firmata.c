@@ -58,8 +58,9 @@ static int spi_reply_cb(struct platform_device *pdev, const u8 rxbuf[], int len)
 	uint8_t id, channel;
 	int i;
 
-	pr_info("spi_reply_cb: received %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x, len %d\n",
-		rxbuf[0], rxbuf[1], rxbuf[2], rxbuf[3], rxbuf[4], rxbuf[5], rxbuf[6], rxbuf[7], rxbuf[8], rxbuf[9], rxbuf[10], rxbuf[11], len);
+	pr_info("%s: received %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x, len %d\n",
+		__func__, rxbuf[0], rxbuf[1], rxbuf[2], rxbuf[3], rxbuf[4], rxbuf[5], rxbuf[6],
+		rxbuf[7], rxbuf[8], rxbuf[9], rxbuf[10], rxbuf[11], len);
 
 	// Discard any data sent outside an SPI transaction, e.g. spurious data on serial interface
 	if (!mutex_is_locked(&spi->lock)) {
@@ -68,28 +69,27 @@ static int spi_reply_cb(struct platform_device *pdev, const u8 rxbuf[], int len)
 	}
 
 	if (rxbuf[0] != SPI_DATA) {
-		pr_err("firmata spi_reply_cb: expected SPI_DATA message, got message code 0x%02x\n", rxbuf[0]);
+		dev_err(&pdev->dev, "%s: expected SPI_DATA message, got message code 0x%02x\n",
+			__func__, rxbuf[0]);
 		return -1;
 	}
 
 	if (rxbuf[1] != SPI_REPLY) {
-		pr_err("unknown SPI reply received: command byte 0x%02x\n", rxbuf[1]);
+		dev_err(&pdev->dev, "unknown SPI reply received: command byte 0x%02x\n", rxbuf[1]);
 		return len;
 	}
-	pr_info("spi_reply_cb: in read transfer\n");
 	id = rxbuf[2] >> 3;
 	channel = rxbuf[2] & 0x7;
-	pr_info("spi_reply_cb: device-id %d, channel %d\n", id, channel);
+	pr_info("%s: device-id %d, channel %d\n", __func__, id, channel);
 	if (spi->req_id != rxbuf[3]) {
-		pr_err("firmata spi_reply_cb: request-id mismatch, expecting %d, got %d", spi->req_id, rxbuf[4]);
+		dev_warn(&pdev->dev, "%s: request-id mismatch, expecting %d, got %d",
+			 __func__, spi->req_id, rxbuf[4]);
 		return -EPROTO;
 	}
 	if ((len - 6) / 2 != rxbuf[4]) {
-		pr_err("firmata spi_reply_cb: length mismatch, sent %d, got %d\n", (len - 6) /2, rxbuf[4]);
+		dev_warn(&pdev->dev, "%s: length mismatch, sent %d, got %d\n", __func__, (len - 6) / 2, rxbuf[4]);
 		return -EPROTO;
 	}
-
-	pr_info("spi_reply_cb: id 0x%02x channel 0x%02x\n", id, channel);
 
 	i = 5;
 	while ((rxbuf[i] != END_SYSEX) && (i / 2 < FIRMATA_SPI_BUF_SIZE)) {
@@ -97,9 +97,7 @@ static int spi_reply_cb(struct platform_device *pdev, const u8 rxbuf[], int len)
 		i += 2;
 	}
 
-	pr_info("spi_reply_cb: complete called\n");
 	complete(&spi->reply_received);
-	pr_info("spi_reply_cb: complete done\n");
 
 	return len;
 }
@@ -125,7 +123,7 @@ static void send_dev_config(struct firmata_spi *spi, struct spi_device *spi_dev)
 	buf[10] = spi_dev->bits_per_word != 8 ? spi_dev->bits_per_word : 0;
 	buf[11] = (spi_dev->mode & SPI_CS_HIGH ? BIT(1) : 0
 			| pdata->host_controls_cs ? 0 : BIT(0));
-	pr_info("send_dev_config: chip_select %d, pin %d\n",
+	pr_info("%s: chip_select %d, pin %d\n", __func__,
 		spi_dev->chip_select, cs_channel_mapping[spi_dev->chip_select]);
 	buf[12] = cs_channel_mapping[spi_dev->chip_select] & 0x7f;
 	buf[13] = END_SYSEX;
@@ -165,7 +163,7 @@ static int firmata_setup(struct spi_device *spi_dev)
 	struct spi_controller *ctrl = spi_dev->master;
 	struct firmata_spi *spi = spi_controller_get_devdata(ctrl);
 
-	pr_info("%s: firmata_setup called\n", __FILE__);
+	pr_info("%s: called\n", __func__);
 	mutex_lock(&spi->lock);
 	if (!spi->spi_enabled)
 		send_spi_begin(spi, spi_dev->chip_select);
@@ -180,11 +178,11 @@ static void firmata_set_cs(struct spi_device *spi_dev, bool active)
 	struct firmata_spi *spi = spi_controller_get_devdata(spi_dev->controller);
 	struct firmata_platform_data *pdata = dev_get_platdata(&spi->pdev->dev);
 
-	pr_info("firmata: firmata_set_cs called, active: %d, cs: %d\n", active, spi_dev->chip_select);
+	pr_info("%s called, active: %d, cs: %d\n", __func__, active, spi_dev->chip_select);
 	if (!spi->spi_enabled)
 		firmata_setup(spi_dev);
 	if (pdata->host_controls_cs) {
-		pr_info("firmata_set_cs: Would set CS now\n");
+		pr_info("%s: Would set CS now\n", __func__);
 		// TODO: do this via gpiod_ calls
 	}
 }
@@ -243,9 +241,9 @@ static int firmata_transfer_one(struct spi_controller *ctrl, struct spi_device *
 
 	timeout = wait_for_completion_timeout(&spi->reply_received, msecs_to_jiffies(500));
 	if (!timeout) {
-		pr_info("spi_read timeout\n");
+		dev_warn(&spi_dev->dev, "spi_read timeout\n");
 		mutex_unlock(&spi->lock);
-                return -ETIMEDOUT;
+		return -ETIMEDOUT;
 	}
 	memcpy(xfer->rx_buf, spi->buf, xfer->len);
 
@@ -260,7 +258,7 @@ static int spi_reset_cb(struct platform_device *pdev, const u8 rxbuf[], int len)
 {
 	struct firmata_spi *spi = platform_get_drvdata(pdev);
 
-	pr_info("spi_reset_cb: called\n");
+	pr_info("%s: called\n", __func__);
 	// There was a reset on the device, and SPI is now disabled. We need to resend
 	// configuration data before the next transfer
 	spi->spi_enabled = false;
@@ -284,7 +282,7 @@ static int firmata_spi_probe(struct platform_device *pdev)
 	int err;
 
 
-	printk(KERN_INFO "Probing %s firmata_spi_probe 1 \n", __FILE__);
+	pr_info("%s probing 1\n", __func__);
 	controller = devm_spi_alloc_master(&pdev->dev, sizeof(*spi));
 	if (!controller) {
 		dev_info(&pdev->dev, "controller allocation failed\n");
@@ -321,19 +319,16 @@ static int firmata_spi_probe(struct platform_device *pdev)
 	}
 
 	err = firmata_register_event_cb(pdev, RESET_CB, spi_reset_cb);
-	printk(KERN_INFO "Probing %s firmata_spi_probe 2\n", __FILE__);
 	err = devm_spi_register_controller(&pdev->dev, controller);
 	if (err) {
 		dev_err(dev, "Could not register SPI controller\n");
 		return -ENODEV;
 	}
 
-	pr_info("firmata_spi_probe: got bus_num %d\n", controller->bus_num);
+	pr_info("%s: got bus_num %d\n", __func__, controller->bus_num);
 
 	firmata_spi_device = spi_new_device(controller, &firmata_chip);
 	if (firmata_spi_device) {
-	pr_info("firmata_spi_probe: GOT bus_num %d\n", controller->bus_num);
-		pr_info("firmata_spi_probe: firmata_spi_device %s\n", dev_name(&firmata_spi_device->dev));
 		dev_info(&firmata_spi_device->dev, "firmata_spi_dev at %s\n",
 			dev_name(&firmata_spi_device->dev));
 	} else {
@@ -352,9 +347,15 @@ exit_free_master:
 // TODO: void in 6.4
 static int firmata_spi_remove(struct platform_device *pdev)
 {
+/*	struct spi_master *ctrl = platform_get_drvdata(pdev);
+ *	pr_info("ctrl: %p\n", (void *)ctrl);
+ *	struct firmata_spi *rs = spi_controller_get_devdata(ctrl);
+ *	pr_info("ctrl: %p\n", (void *)ctrl);
+ */
+	struct firmata_spi *rs;
 	struct spi_master *ctrl = platform_get_drvdata(pdev);
-	struct firmata_spi *rs = spi_controller_get_devdata(ctrl);
 
+	pr_info("%s: pdev: %p, ctrl: %p\n", __func__, (void *)pdev, (void *)ctrl);
 	firmata_unregister_event_cb(pdev, SYSEX_ID | SPI_DATA);
 	return 0;  // TODO: void in 6.4
 }
@@ -375,7 +376,7 @@ static int firmata_spi_resume(struct device *pdev)
 }
 
 static SIMPLE_DEV_PM_OPS(firmata_pm, firmata_spi_suspend, firmata_spi_resume);
-#define FIRMATA_SPI_PM_OPS	&firmata_pm
+#define FIRMATA_SPI_PM_OPS	(&firmata_pm)
 #else
 #define FIRMATA_SPI_PM_OPS	NULL
 #endif
@@ -383,7 +384,7 @@ static SIMPLE_DEV_PM_OPS(firmata_pm, firmata_spi_suspend, firmata_spi_resume);
 static struct platform_driver spi_firmata_driver = {
 	.driver = {
 		.name	= "firmata-spi",
-                .pm     = FIRMATA_SPI_PM_OPS,
+		.pm     = FIRMATA_SPI_PM_OPS,
 	},
 	.probe		= firmata_spi_probe,
 	.remove		= firmata_spi_remove,  // TODO: remove_new in 6.4

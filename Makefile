@@ -1,6 +1,6 @@
 ifneq ($(KERNELRELEASE),)
 # kbuild part of makefile
-obj-m := firmata_mod.o spi-firmata.o gpio-firmata.o i2c-firmata.o
+obj-m := firmata_mod.o spi-firmata.o i2c-firmata.o pinctrl-firmata.o
 
 else
 # normal makefile

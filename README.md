@@ -37,12 +37,12 @@ You can verify whether the drivers are loaded using lsmod:
 $ lsmod | grep firmata
 spi_firmata            16384  0
 i2c_firmata            16384  0
-gpio_firmata           16384  0
-firmata_mod            20480  3 spi_firmata,i2c_firmata,gpio_firmata
+pinctrl_firmata        16384  0
+firmata_mod            20480  3 spi_firmata,i2c_firmata,pinctrl_firmata
 ```
 You can unload the driver again with:
 ```
-$ sudo rmmod gpio_firmata spi_firmata i2c_firmata firmata_mod
+$ sudo rmmod spi_firmata i2c_firmata pinctrl_firmata firmata_mod
 ```
 
 # GPIO-support

@@ -46,16 +46,22 @@ struct firmata_priv {
 	struct list_head event_cb_list;
 	spinlock_t event_cb_lock;
 
+	struct completion capabilites_read;
 	struct completion firmware_initialized;
 	/* Some Arduino devices will reset the moment their USB<->UART
 	 * converter is initialized. We need to wait until this is done,
 	 * at which point these devices send a complete REPORT_FIRMWARE
-	 * message */
+	 * message
+	 */
 	bool boot_completed;
 	int protocol_major;
 	int protocol_minor;
+	int npins;
+	bool supports_i2c;
+	bool supports_spi;
+	int analog_res;
+	u32 pin_caps[FIRMATA_MAX_PINS];
 	struct gpio_chip gpio;
-
 };
 
 struct firmata_event_cb_entry {
@@ -72,7 +78,7 @@ int firmata_register_event_cb(struct platform_device *pdev, u16 id,
 	struct firmata_event_cb_entry *i, *entry;
 	int ret = 0;
 
-	pr_info("firmata_register_event_cb firmata: %p, 0x%04x", firmata, id);
+	pr_info("%s firmata: %p, 0x%04x", __func__, firmata, id);
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry)
 		return -ENOMEM;
@@ -135,11 +141,9 @@ static void firmata_ldisc_tx_worker(struct work_struct *work)
 	struct firmata_priv *firmata = container_of(work, struct firmata_priv, tx_work);
 	ssize_t written;
 
-	pr_info("In firmata_ldisc_tx_worker, left %lu\n", firmata->txleft);
 	spin_lock_bh(&firmata->lock);
 
 	if (firmata->txleft) {
-		pr_info("firmata_ldisc_tx_worker txleft %lu\n", firmata->txleft);
 		written = firmata->tty->ops->write(firmata->tty, firmata->txhead,
 						   firmata->txleft);
 		if (written < 0) {
@@ -166,7 +170,6 @@ static int firmata_ldisc_open(struct tty_struct *tty)
 
 	// TODO: Check for a uart tty, here
 
-	pr_info("firmata_ldisc_open called, allocating firmata data structure\n");
 	if (!tty->ops->write)
 		return -EOPNOTSUPP;
 
@@ -183,8 +186,8 @@ static int firmata_ldisc_open(struct tty_struct *tty)
 	INIT_LIST_HEAD(&firmata->event_cb_list);
 
 	init_completion(&firmata->firmware_initialized);
+	init_completion(&firmata->capabilites_read);
 
-	pr_info("firmata_ldisc_open, firmata pointer %p\n", (void *)firmata);
 	return 0;
 }
 
@@ -192,7 +195,7 @@ static void firmata_ldisc_close(struct tty_struct *tty)
 {
 	struct firmata_priv *firmata = tty->disc_data;
 
-	pr_info("In firmata_ldisc_close\n");
+	pr_info("In %s\n", __func__);
 	// TODO: Here we need to shut down all revices on the busses of this channel
 	/* Give UART one final chance to flush.
 	 * No need to clear TTY_DO_WRITE_WAKEUP since .write_wakeup() is
@@ -200,13 +203,11 @@ static void firmata_ldisc_close(struct tty_struct *tty)
 	 */
 	flush_work(&firmata->tx_work);
 
-	pr_info("In firmata_ldisc_close 2\n");
 	/* Mark channel as dead */
 	spin_lock_bh(&firmata->lock);
 	kfree(tty->disc_data);
 	tty->disc_data = NULL;
 	spin_unlock_bh(&firmata->lock);
-	pr_info("In firmata_ldisc_close 3\n");
 }
 
 /* Called by the driver when there's room for more data. */
@@ -214,7 +215,7 @@ static void firmata_ldisc_tx_wakeup(struct tty_struct *tty)
 {
 	struct firmata_priv *firmata = tty->disc_data;
 
-	pr_info("In firmata_ldisc_tx_wakeup\n");
+	pr_info("In %s\n", __func__);
 	schedule_work(&firmata->tx_work);
 }
 
@@ -233,21 +234,21 @@ static int serial_send(struct tty_struct *tty, uint8_t *buf, int n)
 	struct firmata_priv *firmata = tty->disc_data;
 	int written, i;
 
-	pr_info("serial_send: sending %d >", n);
+	pr_info("%s: sending %d >", __func__, n);
 	for (i = 0; i < n; i++)
 		pr_cont(" %02x", buf[i]);
 	pr_cont("<\n");
 
-        lockdep_assert_held(&firmata->lock);
+	lockdep_assert_held(&firmata->lock);
 
 	set_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
 	written = tty->ops->write(tty, buf, n);  // TODO: return value? can327_send
 	if (written < 0) {
-		pr_err("serial_send: error writing %d", written);
+		pr_err("%s: error writing %d", __func__, written); // TODO: dev_err, see above?
 		return written;
 	}
 
-	pr_info("serial_send: sent %d\n", written);
+	pr_info("%s: sent %d\n", __func__, written);
 	return 0;
 }
 
@@ -296,7 +297,6 @@ static void parse_sysex(struct firmata_priv *firmata, int len)
 		pr_info("Found REPORT_FIRMWARE, len %d\n", len);
 		// Is this a reset on the device?
 		if (firmata->boot_completed) {
-			pr_info("parse_sysex: Initial boot completed\n");
 			run_event_callbacks(firmata, RESET_CB, firmata->rxbuf + i, len);
 			break;
 		}
@@ -304,7 +304,6 @@ static void parse_sysex(struct firmata_priv *firmata, int len)
 			firmata->protocol_major = firmata->rxbuf[i + 1];
 			firmata->protocol_minor = firmata->rxbuf[i + 2];
 		} else {
-			pr_err("FIRMATA: malformed REPORT_FIRMWARE message\n");
 			return;
 		}
 		i = 4;
@@ -314,11 +313,37 @@ static void parse_sysex(struct firmata_priv *firmata, int len)
 			i += 2;
 		}
 		buf[i / 2 - 2] = '\0';
-		pr_info("Protocol version %c.%c, version string %s\n", firmata->protocol_major + '0',
-						  firmata->protocol_minor + '0', buf);
+		pr_info("FIRMATA protocol version %c.%c, version string %s\n",
+			firmata->protocol_major + '0', firmata->protocol_minor + '0', buf);
 		firmata->boot_completed = true;
 		complete(&firmata->firmware_initialized);
 		break;
+
+	case CAPABILITY_RESPONSE:
+		int pin = 0;
+
+		i = 2;
+		while ((firmata->rxbuf[i] != END_SYSEX)) {
+			if (firmata->rxbuf[i] == MODE_IGNORE) {
+				pin++;
+				i++;
+				continue;
+			}
+			if (firmata->rxbuf[i] < 0x1f) {
+				firmata->pin_caps[pin] |= BIT(firmata->rxbuf[i]);
+				if (firmata->rxbuf[i] == MODE_ANALOG)
+					firmata->analog_res = buf[i+1];
+				if (firmata->rxbuf[i] == MODE_I2C)
+					firmata->supports_i2c = true;
+				if (firmata->rxbuf[i] == MODE_SPI)
+					firmata->supports_spi = true;
+				i += 2;
+			}
+		}
+		firmata->npins = pin;
+		complete(&firmata->capabilites_read);
+		break;
+
 	case STRING_MESSAGE:
 		i = 2;
 		while ((firmata->rxbuf[i] != END_SYSEX) && (i / 2 < MSG_BUFFER_SIZE)) {
@@ -327,18 +352,15 @@ static void parse_sysex(struct firmata_priv *firmata, int len)
 			i += 2;
 		}
 		buf[i / 2 - 1] = '\0';
-		pr_info("STRING_MESSAGE: %s\n", buf);
+		pr_info("Firmata: STRING_MESSAGE %s\n", buf);
 		break;
-	case SPI_DATA:
-	case I2C_REPLY:
-	case PIN_STATE_RESPONSE:
-		run_event_callbacks(firmata, SYSEX_ID | sysex_code, firmata->rxbuf + i, len);
-		break;
+
 	case END_SYSEX:
 		// Empty message, ignore
 		break;
+
 	default:
-		pr_info("Unknown SYSEX message %02x", firmata->rxbuf[i]);
+		run_event_callbacks(firmata, SYSEX_ID | sysex_code, firmata->rxbuf + i, len);
 	}
 }
 
@@ -351,13 +373,13 @@ static int parse_rxbuf(struct firmata_priv *firmata)
 {
 	size_t pos = 0;
 
-	pr_info("parse_rxbuf, fill %d, Message %02x %02x %02x\n", firmata->rxfill,
+	pr_info("%s: fill %d, Message %02x %02x %02x\n", __func__, firmata->rxfill,
 		firmata->rxbuf[pos], firmata->rxbuf[pos + 1], firmata->rxbuf[pos + 2]);
 	lockdep_assert_held(&firmata->lock);
 	// We have at least one byte and it is always the start of a message
 
 	if (firmata->rxbuf[pos] == START_SYSEX) {
-		pr_info("Found START_SYSEX\n");
+		pr_info("%s: Found START_SYSEX\n", __func__);
 		for (pos = 0; pos < firmata->rxfill; pos++) {
 			if (firmata->rxbuf[pos] ==  END_SYSEX)
 				break;
@@ -372,9 +394,9 @@ static int parse_rxbuf(struct firmata_priv *firmata)
 			drop_bytes(firmata, pos + 1);
 			return 1;
 		}
+		// We do not have all of the message yet and have space for more
+		return 0;
 	} else if (firmata->rxbuf[pos] == REPORT_VERSION) {
-		pr_info("Got firmware version %d.%d\n",
-			firmata->rxbuf[pos + 1], firmata->rxbuf[pos + 2]);
 		firmata->protocol_major = firmata->rxbuf[pos + 1];
 		firmata->protocol_minor = firmata->rxbuf[pos + 2];
 		drop_bytes(firmata, 3);
@@ -387,13 +409,12 @@ static int parse_rxbuf(struct firmata_priv *firmata)
 		run_event_callbacks(firmata, FIRMATA_GPIO_EVENT, firmata->rxbuf + pos, 3);
 		drop_bytes(firmata, 3);
 		return 1;
-	} else {
-		pr_info("parse_rxbuf: Unknown message %02x\n", firmata->rxbuf[pos]);
-		drop_bytes(firmata, 1);
-		return 1;
-	};
+	}
 
-	return 0;
+	dev_warn(firmata->tty->dev, "%s: Unknown message %02x\n",
+		 __func__, firmata->rxbuf[pos]);
+	drop_bytes(firmata, 1);
+	return 1;
 }
 
 /* Handle incoming data from the Firmata device
@@ -406,7 +427,7 @@ static int firmata_ldisc_rx(struct tty_struct *tty, const unsigned char *cp,
 	struct firmata_priv *firmata = tty->disc_data;
 	int received = count;
 
-	pr_info("In firmata_ldisc_rx, received %d\n", received);
+	pr_info("In %s, received %d\n", __func__, received);
 	spin_lock_bh(&firmata->lock);
 
 	pr_info("RX: ");
@@ -433,7 +454,7 @@ static int firmata_ldisc_rx(struct tty_struct *tty, const unsigned char *cp,
 		return -ENOMEM;
 	}
 
-	while(firmata->rxfill) {
+	while (firmata->rxfill) {
 		if (!parse_rxbuf(firmata))
 			break;
 	}
@@ -443,8 +464,27 @@ static int firmata_ldisc_rx(struct tty_struct *tty, const unsigned char *cp,
 	return count;
 }
 
+static void firmata_read_caps(struct firmata_priv *firmata)
+{
+	uint8_t get_caps[3];
+	int timeout;
+
+	pr_info("%s: called\n", __func__);
+	get_caps[0] = START_SYSEX;
+	get_caps[1] = CAPABILITY_QUERY;
+	get_caps[2] = END_SYSEX;
+
+	spin_lock_bh(&firmata->lock);
+	serial_send(firmata->tty, get_caps, 3);
+	spin_unlock_bh(&firmata->lock);
+
+	timeout = wait_for_completion_timeout(&firmata->capabilites_read, msecs_to_jiffies(50));
+	if (!timeout)
+		dev_warn(firmata->tty->dev, "%s: timeout!\n", __func__);
+}
+
 static struct tty_ldisc_ops firmata_ldisc_ops = {
-//	.owner		= THIS_MODULE TODO: For now, so we can test, need to split moduels later
+//	.owner		= THIS_MODULE TODO: For now, so we can test, need to split modules later
 	.num		= N_FIRMATA,
 	.name		= "firmata_ldisc",
 	.open		= firmata_ldisc_open,
@@ -461,23 +501,17 @@ static void set_uart_config(struct tty_struct *uart, int baudrate)
 	new_termios = uart->termios;
 	up_read(&uart->termios_rwsem);
 	tty_termios_encode_baud_rate(&new_termios, baudrate, baudrate);
-	printk(KERN_INFO "%s termios c_cflags %x c_iflag %x\n", __FILE__, new_termios.c_cflag, new_termios.c_iflag);
+	pr_info("%s termios c_cflags %x c_iflag %x\n", __func__, new_termios.c_cflag, new_termios.c_iflag);
+	// Ignore input errors and parity errors
 	new_termios.c_iflag = IGNBRK | IGNPAR;
-//	new_termios.c_cflag = CS8 | CREAD | HUPCL | CLOCAL;
+//	TODO: see https://linux.die.net/man/3/termios
+//	TODO: understand flags by enabling them one by one: new_termios.c_cflag = CS8 | CREAD | HUPCL | CLOCAL;
 
 	// Make sure HW flow control is off
 	new_termios.c_cflag &= ~CRTSCTS;
 	tty_set_termios(uart, &new_termios);
 
 	clear_bit(TTY_HUPPED, &uart->flags);
-
-	/* ensure hardware flow control is enabled */
-	down_read(&uart->termios_rwsem);
-	new_termios = uart->termios;
-	up_read(&uart->termios_rwsem);
-	/*
-	if (!(new_termios.c_cflag & CRTSCTS))
-		pr_warn("firmata: Failed to set hardware flow control\n");*/
 }
 
 
@@ -492,15 +526,12 @@ static struct tty_struct *firmata_tty_init(struct device *dev)
 		// A device with this name might appear later, keep retrying
 		return ERR_PTR(-EAGAIN);
 	}
-	printk(KERN_INFO "Probing %s, devno is %x\n", __FILE__, devno);
+	pr_info("Probing %s, devno is %x\n", __FILE__, devno);
 	tty = tty_kopen_exclusive(devno);
 	if (IS_ERR(tty) || !tty) {
 		dev_err(dev, "could not open TTY\n");
 		return tty;
 	}
-
-	printk(KERN_INFO "Got TTY %s\n", __FILE__);
-	printk(KERN_INFO "ldisk ptr %p", (void *)(tty->ldisc));
 
 	if (tty->ops->open)
 		err = tty->ops->open(tty, NULL);
@@ -508,13 +539,13 @@ static struct tty_struct *firmata_tty_init(struct device *dev)
 		err = -ENODEV;
 
 	if (err) {
-		printk(KERN_INFO "%s Opening TTY %s failed\n", firmata_port, __FILE__);
+		pr_info("FIRMATA: opening TTY %s failed\n", firmata_port);
 		tty_unlock(tty);
 		return ERR_PTR(err);
 	}
 
 	set_uart_config(tty, baud_rate);
-	printk(KERN_INFO "TTY Baud Rates is %d\n", cpu_to_le32(tty_get_baud_rate(tty)));
+	pr_info("TTY Baud Rates is %d\n", cpu_to_le32(tty_get_baud_rate(tty)));
 
 	tty_unlock(tty);
 
@@ -544,10 +575,10 @@ static struct tty_struct *firmata_tty_init(struct device *dev)
 }
 
 enum {
-	FIRMATA_ACPI_MATCH_GPIO	= 0,
-	FIRMATA_ACPI_MATCH_I2C	= 1,
-	FIRMATA_ACPI_MATCH_SPI	= 2,
-	FIRMATA_ACPI_MATCH_ADC	= 3,
+	FIRMATA_ACPI_MATCH_ADC		= 0,
+	FIRMATA_ACPI_MATCH_I2C		= 1,
+	FIRMATA_ACPI_MATCH_SPI		= 2,
+	FIRMATA_ACPI_MATCH_PINCTRL	= 3,
 };
 
 /* Only one SPI port supported */
@@ -569,21 +600,15 @@ static struct mfd_cell_acpi_match firmata_acpi_match_i2c = {
 	.adr = FIRMATA_ACPI_MATCH_I2C,
 };
 
-static struct firmata_platform_data firmata_pdata_gpio = {
+static struct firmata_platform_data firmata_pdata_pinctrl = {
 	.port = 0,
 };
 
-static struct mfd_cell_acpi_match firmata_acpi_match_gpio = {
-	.adr = FIRMATA_ACPI_MATCH_GPIO,
+static struct mfd_cell_acpi_match firmata_acpi_match_pinctrl = {
+	.adr = FIRMATA_ACPI_MATCH_PINCTRL,
 };
 
 static const struct mfd_cell firmata_privs[] = {
-	{
-		.name = "firmata-gpio",
-		.acpi_match = &firmata_acpi_match_gpio,
-		.platform_data = &firmata_pdata_gpio,
-		.pdata_size = sizeof(struct firmata_platform_data),
-	},
 	{
 		.name = "firmata-i2c",
 		.acpi_match = &firmata_acpi_match_i2c,
@@ -596,25 +621,29 @@ static const struct mfd_cell firmata_privs[] = {
 		.platform_data = &firmata_pdata_spi,
 		.pdata_size = sizeof(struct firmata_platform_data),
 	},
+	{
+		.name = "pinctrl-firmata",
+		.acpi_match = &firmata_acpi_match_pinctrl,
+		.platform_data = &firmata_pdata_pinctrl,
+		.pdata_size = sizeof(struct firmata_platform_data),
+	},
 };
 
 static int firmata_probe(struct platform_device *pdev)
 {
 	struct firmata_priv *firmata;
-	int err;
+	int err = 0;
 	struct tty_struct *tty;
 	uint8_t get_firmware_version[3] = {START_SYSEX, REPORT_FIRMWARE, END_SYSEX};
 	int timeout;
 
-	printk(KERN_INFO "Probing %s\n", __FILE__);
+	dev_info(&pdev->dev, "Probing %s\n", __FILE__);
 	tty = firmata_tty_init(&pdev->dev);
 	if (IS_ERR(tty))
 		return PTR_ERR(tty);
 
-	printk(KERN_INFO "Probing %s firmata_probe 2 \n", __FILE__);
 	firmata = tty->disc_data;
 
-	printk(KERN_INFO "Probing %s firmata_probe 3 \n", __FILE__);
 	spin_lock_bh(&firmata->lock);
 	serial_send(tty, get_firmware_version, 3); // TODO: This needs to come from the driver data
 
@@ -622,16 +651,21 @@ static int firmata_probe(struct platform_device *pdev)
 
 	firmata_tty = tty;
 
-	timeout = wait_for_completion_timeout(&firmata->firmware_initialized, msecs_to_jiffies(10000));
+	timeout = wait_for_completion_timeout(&firmata->firmware_initialized,
+					      msecs_to_jiffies(10000));
 	if (!timeout) {
-		dev_warn(&pdev->dev, "timeout waiting for firmware initialization\n");
-                return -ENODEV;
+		dev_err(&pdev->dev, "timeout waiting for firmware initialization\n");
+		return -ENODEV;
 	}
+
+	firmata_read_caps(firmata);
+	firmata_pdata_pinctrl.npins = firmata->npins;
+	firmata_pdata_pinctrl.pin_caps = firmata->pin_caps;
+
 	err = mfd_add_hotplug_devices(&pdev->dev, firmata_privs, ARRAY_SIZE(firmata_privs));
-	if (err) {
+	if (err)
 		dev_err(&pdev->dev, "failed to add mfd devices to core\n");
-	}
-	return 0;
+	return err;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -646,42 +680,40 @@ static int firmata_resume(struct device *pdev)
 }
 
 static SIMPLE_DEV_PM_OPS(firmata_pm, firmata_suspend, firmata_resume);
-#define FIRMATA_PM_OPS	&firmata_pm
+#define FIRMATA_PM_OPS	(&firmata_pm)
 #else
 #define FIRMATA_PM_OPS	NULL
 #endif
 
 static struct platform_driver firmata_driver = {
-        .probe          = firmata_probe,
-        .driver         = {
-                .name   = FIRMATA_DRIVER,
-                .pm     = FIRMATA_PM_OPS,
-        },
+	.probe		= firmata_probe,
+	.driver		= {
+		.name	= FIRMATA_DRIVER,
+		.pm	= FIRMATA_PM_OPS,
+	},
 };
 
 static int __init firmata_init(void)
 {
 	int err = 0;
 
-	printk(KERN_INFO "Loading firmata module...\n");
+	pr_info("%s: Loading firmata module...\n", __func__);
 
 	err = tty_register_ldisc(&firmata_ldisc_ops);
 	if (err)
-		pr_err("Can't register line discipline\n");
+		pr_err("%s, Can't register line discipline\n", __func__);
 
-	printk(KERN_INFO "Registered ldisc\n");
 	err = platform_driver_register(&firmata_driver);
 	if (err < 0)
 		return err;
 
-	printk(KERN_INFO "Registered firmata platform driver\n");
 	pdevice = platform_device_register_simple(FIRMATA_DRIVER, 0, NULL, 0);
 	if (IS_ERR(pdevice)) {
-                pr_err("failed registering %s: %ld\n", FIRMATA_DRIVER, PTR_ERR(pdevice));
+		pr_err("failed registering %s: %ld\n", FIRMATA_DRIVER, PTR_ERR(pdevice));
 		return -ENODEV;
 	}
 
-	printk(KERN_INFO "Firmata module inserted, tty port %s\n", firmata_port);
+	pr_info("%s: Firmata module inserted, tty port %s\n", __func__, firmata_port);
 
 	return 0;
 }
@@ -692,7 +724,7 @@ static void __exit firmata_exit(void)
 
 	// TODO: Instead of using the global firmata_tty, we should make use only of getting the LDISC
 	// and the go for the firmata structure
-	pr_info("firmata_exit: called\n");
+	pr_info("%s: called, removing module\n", __func__);
 
 	if (tty) {
 		tty_lock(tty);
@@ -701,14 +733,13 @@ static void __exit firmata_exit(void)
 		tty_ldisc_flush(tty);
 		tty_unlock(tty);
 		tty_kclose(tty);
-		pr_info("firmata_exit: Closed tty!\n");
+		pr_info("%s: Closed tty!\n", __func__);
 	}
 
 	firmata_tty = NULL;
-        platform_device_unregister(pdevice);
+	platform_device_unregister(pdevice);
 	platform_driver_unregister(&firmata_driver);
 
-	pr_info("Unregistering ldisc\n");
 	/* This will only be called when all channels have been closed by
 	 * userspace - tty_ldisc.c takes care of the module's refcount.
 	 */

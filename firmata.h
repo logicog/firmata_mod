@@ -19,6 +19,7 @@
 #define MODE_ENCODER		0x09
 #define MODE_SERIAL		0x0A
 #define MODE_PULLUP		0x0B
+#define MODE_SPI		0x0C
 #define MODE_IGNORE		0x7F
 
 /* Message codes */
@@ -43,10 +44,10 @@
 #define SYSEX_ID		(START_SYSEX << 8)
 #define RESET_CB			0x00
 
-#define FIRMATA_SIZE_TXBUF 32
-#define FIRMATA_SIZE_RXBUF 1024
-
-#define FIRMATA_GPIO_EVENT 1
+#define FIRMATA_SIZE_TXBUF	32
+#define FIRMATA_SIZE_RXBUF	1024
+#define FIRMATA_MAX_PINS	40
+#define FIRMATA_GPIO_EVENT	1
 
 /**
  * firmata_event_cb_t - event callback function signature
@@ -70,6 +71,9 @@ void firmata_unregister_event_cb(struct platform_device *pdev, u16 id);
 
 
 struct firmata_platform_data {
+	int npins;
+	// Per-pin bit-field of capabilities, up to FIRMATA_MAX_PINS pins
+	u32 *pin_caps;
 	bool host_controls_cs;
 	// maybe use tty device number? tty_dev_name_to_number
 	uint8_t port;
