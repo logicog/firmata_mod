@@ -231,14 +231,12 @@ out_disable:
 	return ret;
 }
 
-static int firmata_i2c_remove(struct platform_device *pdev)
+static void firmata_i2c_remove(struct platform_device *pdev)
 {
 	struct firmata_i2c *i2c = platform_get_drvdata(pdev);
 
 	firmata_unregister_event_cb(pdev, SYSEX_ID | I2C_REPLY);
 	i2c_del_adapter(&i2c->adapter);
-
-	return 0;
 }
 
 static struct platform_driver i2c_firmata_driver = {
@@ -246,7 +244,7 @@ static struct platform_driver i2c_firmata_driver = {
 		.name	= "firmata-i2c",
 	},
 	.probe		= firmata_i2c_probe,
-	.remove		= firmata_i2c_remove,  // TODO: remove_new in 6.4
+	.remove		= firmata_i2c_remove,
 };
 module_platform_driver(i2c_firmata_driver);
 

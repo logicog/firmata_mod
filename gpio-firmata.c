@@ -366,14 +366,13 @@ static int firmata_gpio_probe(struct platform_device *pdev)
 	return 0;
 }
 
-// TODO: void in 6.4
-static int firmata_gpio_remove(struct platform_device *pdev)
+
+static void firmata_gpio_remove(struct platform_device *pdev)
 {
 //	struct firmata_gpio *gpio = platform_get_drvdata(pdev);
 
 	firmata_unregister_event_cb(pdev, FIRMATA_GPIO_EVENT);
 	firmata_unregister_event_cb(pdev, SYSEX_ID | PIN_STATE_RESPONSE);
-	return 0;  // TODO: void in 6.4
 }
 
 
@@ -400,7 +399,7 @@ static struct platform_driver gpio_firmata_driver = {
                 .pm     = FIRMATA_SPI_PM_OPS,
 	},
 	.probe		= firmata_gpio_probe,
-	.remove		= firmata_gpio_remove,  // TODO: remove_new in 6.4
+	.remove		= firmata_gpio_remove,
 };
 module_platform_driver(gpio_firmata_driver);
 

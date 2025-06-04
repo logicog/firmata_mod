@@ -400,8 +400,8 @@ static int parse_rxbuf(struct firmata_priv *firmata)
  * This will not be re-entered while running, but other ldisc
  * functions may be called in parallel.
  */
-static int firmata_ldisc_rx(struct tty_struct *tty, const unsigned char *cp,
-			    const char *fp, int count)
+static size_t firmata_ldisc_rx(struct tty_struct *tty, const u8 *cp,
+			    const u8 *fp, size_t count)
 {
 	struct firmata_priv *firmata = tty->disc_data;
 	int received = count;

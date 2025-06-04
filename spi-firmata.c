@@ -108,13 +108,13 @@ static void send_dev_config(struct firmata_spi *spi, struct spi_device *spi_dev)
 {
 	struct firmata_platform_data *pdata = dev_get_platdata(&spi->pdev->dev);
 	uint8_t buf[14];
-	int id = 0;
+	u8 id = 0;
 	uint32_t speed = spi_dev->max_speed_hz; // TODO: use minimum of spi->speed and speed
 
 	buf[0] = START_SYSEX;
 	buf[1] = SPI_DATA;
 	buf[2] = SPI_DEVICE_CONFIG;
-	buf[3] = spi_dev->chip_select | id << 3;
+	buf[3] = spi_get_chipselect(spi_dev, 0) | id << 3;
 	buf[4] = ((spi_dev->mode & 0x3) << 1) | (spi_dev->mode & SPI_LSB_FIRST ? 0 : BIT(0));
 	buf[5] = speed & 0x7f;
 	buf[6] = (speed >> 7) & 0x7f;
@@ -126,8 +126,8 @@ static void send_dev_config(struct firmata_spi *spi, struct spi_device *spi_dev)
 	buf[11] = (spi_dev->mode & SPI_CS_HIGH ? BIT(1) : 0
 			| pdata->host_controls_cs ? 0 : BIT(0));
 	pr_info("send_dev_config: chip_select %d, pin %d\n",
-		spi_dev->chip_select, cs_channel_mapping[spi_dev->chip_select]);
-	buf[12] = cs_channel_mapping[spi_dev->chip_select] & 0x7f;
+		spi_get_chipselect(spi_dev, 0), cs_channel_mapping[spi_get_chipselect(spi_dev, 0)]);
+	buf[12] = cs_channel_mapping[spi_get_chipselect(spi_dev, 0)] & 0x7f;
 	buf[13] = END_SYSEX;
 
 	firmata_serial_tx(spi->pdev, buf, 14);
@@ -162,13 +162,13 @@ static void send_spi_end(struct firmata_spi *spi, int channel)
 
 static int firmata_setup(struct spi_device *spi_dev)
 {
-	struct spi_controller *ctrl = spi_dev->master;
+	struct spi_controller *ctrl = spi_dev->controller;
 	struct firmata_spi *spi = spi_controller_get_devdata(ctrl);
 
 	pr_info("%s: firmata_setup called\n", __FILE__);
 	mutex_lock(&spi->lock);
 	if (!spi->spi_enabled)
-		send_spi_begin(spi, spi_dev->chip_select);
+		send_spi_begin(spi, spi_get_chipselect(spi_dev, 0));
 	spi->spi_enabled = true;
 	send_dev_config(spi, spi_dev);
 	mutex_unlock(&spi->lock);
@@ -180,7 +180,7 @@ static void firmata_set_cs(struct spi_device *spi_dev, bool active)
 	struct firmata_spi *spi = spi_controller_get_devdata(spi_dev->controller);
 	struct firmata_platform_data *pdata = dev_get_platdata(&spi->pdev->dev);
 
-	pr_info("firmata: firmata_set_cs called, active: %d, cs: %d\n", active, spi_dev->chip_select);
+	pr_info("firmata: firmata_set_cs called, active: %d, cs: %d\n", active, spi_get_chipselect(spi_dev, 0));
 	if (!spi->spi_enabled)
 		firmata_setup(spi_dev);
 	if (pdata->host_controls_cs) {
@@ -344,26 +344,25 @@ static int firmata_spi_probe(struct platform_device *pdev)
 	return 0;
 
 exit_free_master:
-	spi_master_put(controller);
+	spi_controller_put(controller);
 
 	return err;
 }
 
-// TODO: void in 6.4
-static int firmata_spi_remove(struct platform_device *pdev)
+
+static void firmata_spi_remove(struct platform_device *pdev)
 {
-	struct spi_master *ctrl = platform_get_drvdata(pdev);
+	struct spi_controller *ctrl = platform_get_drvdata(pdev);
 	struct firmata_spi *rs = spi_controller_get_devdata(ctrl);
 
 	firmata_unregister_event_cb(pdev, SYSEX_ID | SPI_DATA);
-	return 0;  // TODO: void in 6.4
 }
 
 
 #ifdef CONFIG_PM
 static int firmata_spi_suspend(struct device *dev)
 {
-	struct spi_master *ctrl = dev_get_drvdata(dev);
+	struct spi_controller *ctrl = dev_get_drvdata(dev);
 	struct firmata_spi *rs = spi_controller_get_devdata(ctrl);
 
 	return 0;
@@ -386,7 +385,7 @@ static struct platform_driver spi_firmata_driver = {
                 .pm     = FIRMATA_SPI_PM_OPS,
 	},
 	.probe		= firmata_spi_probe,
-	.remove		= firmata_spi_remove,  // TODO: remove_new in 6.4
+	.remove		= firmata_spi_remove,
 };
 module_platform_driver(spi_firmata_driver);
 
