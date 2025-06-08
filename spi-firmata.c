@@ -285,7 +285,7 @@ static int firmata_spi_probe(struct platform_device *pdev)
 
 
 	printk(KERN_INFO "Probing %s firmata_spi_probe 1 \n", __FILE__);
-	controller = devm_spi_alloc_master(&pdev->dev, sizeof(*spi));
+	controller = devm_spi_alloc_host(&pdev->dev, sizeof(*spi));
 	if (!controller) {
 		dev_info(&pdev->dev, "controller allocation failed\n");
 		return -ENOMEM;
